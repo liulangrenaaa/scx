@@ -592,6 +592,31 @@ static __always_inline bool cake_stage(const struct task_struct *p)
 	       p->se.sum_exec_runtime >= SEAT_BURST_MIN_NS * n;
 }
 
+/* Compare @a * @b and @c * @d without truncating either product. */
+static __always_inline bool cake_ratio_gt(u64 a, u64 b, u64 c, u64 d)
+{
+	u64 a_lo = (u32)a, a_hi = a >> 32;
+	u64 b_lo = (u32)b, b_hi = b >> 32;
+	u64 c_lo = (u32)c, c_hi = c >> 32;
+	u64 d_lo = (u32)d, d_hi = d >> 32;
+	u64 ab_00 = a_lo * b_lo;
+	u64 ab_01 = a_lo * b_hi;
+	u64 ab_10 = a_hi * b_lo;
+	u64 ab_11 = a_hi * b_hi;
+	u64 cd_00 = c_lo * d_lo;
+	u64 cd_01 = c_lo * d_hi;
+	u64 cd_10 = c_hi * d_lo;
+	u64 cd_11 = c_hi * d_hi;
+	u64 ab_mid = (ab_00 >> 32) + (u32)ab_01 + (u32)ab_10;
+	u64 cd_mid = (cd_00 >> 32) + (u32)cd_01 + (u32)cd_10;
+	u64 ab_hi = ab_11 + (ab_01 >> 32) + (ab_10 >> 32) + (ab_mid >> 32);
+	u64 cd_hi = cd_11 + (cd_01 >> 32) + (cd_10 >> 32) + (cd_mid >> 32);
+	u64 ab_lo = (ab_00 & 0xffffffff) | (ab_mid << 32);
+	u64 cd_lo = (cd_00 & 0xffffffff) | (cd_mid << 32);
+
+	return ab_hi > cd_hi || (ab_hi == cd_hi && ab_lo > cd_lo);
+}
+
 /* Does this task wait longer than it runs? run_delay/pcount is the mean wait,
  * sum_exec_runtime/nvcsw the mean burst; cross-multiplied, the shared
  * pre-scale cancels. The threshold is a definition, not a tuning. */
@@ -602,7 +627,8 @@ static __always_inline bool cake_starved(const struct task_struct *p)
 
 	if (!run)
 		return false;
-	return wait * (p->nvcsw | 1) > run * (p->sched_info.pcount | 1);
+	return cake_ratio_gt(wait, p->nvcsw | 1, run,
+			     p->sched_info.pcount | 1);
 }
 
 /* Does this task wait longer than one turn of its own? cake_starved has no
@@ -615,7 +641,8 @@ static __always_inline bool cake_starved_turn(const struct task_struct *p)
 
 	if (!run)
 		return false;
-	return wait * (p->nvcsw | 1) > (run << 1) * (p->sched_info.pcount | 1);
+	return cake_ratio_gt(wait, p->nvcsw | 1, run << 1,
+			     p->sched_info.pcount | 1);
 }
 
 _Static_assert(sizeof(struct cake_slot) == STATE_SLOT_BYTES,
